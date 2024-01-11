@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 import argparse
 import shutil
+from PIL import Image
 import os
 import cv2
 import glob
@@ -77,18 +78,15 @@ class Predictor(BasePredictor):
         }
     # ======= def setup(self) ===================================================================================================================
 
-    # @cog.Input("image", output_type=Path, help="input image")
-    # @cog.Input("task_type", output_type=str, default='Real-World Image Super-Resolution', options=['Real-World Image Super-Resolution', 'Grayscale Image Denoising', 'Color Image Denoising', 'JPEG Compression Artifact Reduction'], help="image restoration task type")
-    # @cog.Input("noise", output_type=int, default=15, options=[15, 25, 50],    help='noise level, activated for Grayscale Image Denoising and Color Image Denoising. Leave it as default or arbitrary if other tasks are selected')
-    # @cog.Input("jpeg", output_type=int, default=40, options=[10, 20, 30, 40], help='scale factor, activated for JPEG Compression Artifact Reduction. Leave it as default or arbitrary if other tasks are selected')
-
     # начало выполнения, тут описание входных параметров и код для обработки фото. Входные значения по умолчанию:
     def predict(
         self,
         image: cog.Path = Input(description="Input image"),
         task_type:  str = Input(description="Image restoration task type", default='Real-World Image Super-Resolution-Large', choices=['Real-World Image Super-Resolution-Large', 'Real-World Image Super-Resolution-Medium', 'Grayscale Image Denoising', 'Color Image Denoising', 'JPEG Compression Artifact Reduction']),
         noise:      int = Input(description="Noise level, activated for Grayscale Image Denoising and Color Image Denoising. Leave it as default or arbitrary if other tasks are selected", default=15, choices=[15, 25, 50]),
-        jpeg:       int = Input(description="Scale factor, activated for JPEG Compression Artifact Reduction. Leave it as default or arbitrary if other tasks are selected",                default=40, choices=[10, 20, 30, 40])
+        jpeg:       int = Input(description="Scale factor, activated for JPEG Compression Artifact Reduction. Leave it as default or arbitrary if other tasks are selected",                default=40, choices=[10, 20, 30, 40]),
+        out_format: str = Input(description="Output image format", default='png', choices=['png', 'jpg']),
+        out_jpg_quality: int = Input(description="If the output format is jpg, specify the quality", default=95, ge=40, le=100)
     ) -> cog.Path:  # возвращаемый тип данных 'Path' (так работаеет и выводит путь к файлу)
 
         self.args.task  = self.tasks[task_type]
@@ -111,13 +109,10 @@ class Predictor(BasePredictor):
             self.args.model_path = self.model_zoo[self.args.task][jpeg]
 
         try:
-            # set input folder
-            # input_dir = 'input_cog_temp'
-            # input_dir = 'in_temp_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
             input_dir = 'in_temp_' + secrets.token_hex(6) # папка будет примерно такой: in_temp_6f17fffb0c5e
             os.makedirs(input_dir, exist_ok=True) # создает директорию 'input_cog_temp' (и всех необходимых поддиректорий), и если она уже существует, то код продолжит работу без ошибок
             input_path = os.path.join(input_dir, os.path.basename(str(image))) # создает полный путь к файлу, объединяя путь к директории (input_dir) с именем файла, извлеченным из полного пути к изображению (image)
-            shutil.copy(str(image), input_path) # копирует файл, указанный в переменной image, в директорию, указанную в переменной input_path.
+            shutil.copy(str(image), input_path) # копирует файл, указанный в переменной image, в директорию, указанную в переменной input_path. Вопрос: зачем? файл проще обрабатывать чем папку целиком
             if self.args.task == 'real_sr':
                 self.args.folder_lq = input_dir
             else:
@@ -137,7 +132,8 @@ class Predictor(BasePredictor):
             test_results['ssim_y'] = []
             test_results['psnr_b'] = []
             # psnr, ssim, psnr_y, ssim_y, psnr_b = 0, 0, 0, 0, 0
-            out_path = Path(tempfile.mkdtemp()) / "out.png"
+            out_path_png = Path(tempfile.mkdtemp()) / "out.png"
+            out_path_jpg = Path(tempfile.mkdtemp()) / "out.jpg"
             out_file = None
 
             for idx, path in enumerate(sorted(glob.glob(os.path.join(folder, '*')))):
@@ -162,10 +158,14 @@ class Predictor(BasePredictor):
                 if output.ndim == 3:
                     output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HCW-BGR
                 output = (output * 255.0).round().astype(np.uint8)  # float32 to uint8
-                cv2.imwrite(str(out_path), output) # сохранение изображения output по указанному пути out_path
+                cv2.imwrite(str(out_path_png), output) # сохранение изображения output по указанному пути out_path_png
+
+            if out_format == 'jpg': # если указали выхоной формат JPG тогда сконвертируем выходной файл
+                with Image.open(out_path_png) as img: # Открываем изображение в формате PNG
+                    img.convert("RGB").save(out_path_jpg, quality=out_jpg_quality, format="JPEG") # Конвертируем и сохраняем в формате JPG с указанным качеством
 
             # Открываем файл и считываем его содержимое
-            # with open(out_path, "rb") as file:
+            # with open(out_path_png, "rb") as file:
                 # out_file = file.read()
 
         except Exception as e:
@@ -173,20 +173,14 @@ class Predictor(BasePredictor):
 
         finally:
             clean_folder(input_dir)
-        return cog.Path(out_path)  # вернет это если просто "out_path": /tmp/tmp6kb2tdkb/out.png   А если cog.Path(out_path) то полный путь вернет:  https://storage.googleapis.com/replicate-files/axP9vfqe6viw00gTspkLFslzjFvcZgERTkVZ69jUOJPxZOKSA/out.png
+
+        if out_format == 'jpg':
+            return cog.Path(out_path_jpg)
+        else:
+            return cog.Path(out_path_png)  # вернет полный путь вернет:  https://storage.googleapis.com/replicate-files/axP9vfqe6viw00gTspkLFslzjFvcZgERTkVZ69jUOJPxZOKSA/out.png
+
         # return cog.File(out_file)    # Так НЕ пашет ошибка 2
 
-
-# def clean_folder(folder):
-#     for filename in os.listdir(folder):
-#         file_path = os.path.join(folder, filename)
-#         try:
-#             if os.path.isfile(file_path) or os.path.islink(file_path):  # является ли путь file_path файлом или является ли путь file_path символической ссылкой
-#                 os.unlink(file_path)                                    #  удаляет файл по указанному пути.
-#             elif os.path.isdir(file_path):
-#                 shutil.rmtree(file_path)
-#         except Exception as e:
-#             print('Failed to delete %s. Reason: %s' % (file_path, e))
 
 def clean_folder(folder):
     try:
@@ -195,3 +189,4 @@ def clean_folder(folder):
         # print(f"Папка {folder} успешно очищена и удалена.")
     except Exception as e:
         print(f"Failed to delete Temp_cog folder: {str(e)}")
+
